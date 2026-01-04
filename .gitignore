@@ -1,5 +1,35 @@
-.qmake.stash
-Makefile
-moc_*
+# C++
+*.d
 *.o
-selectdefaultapplication
+*.obj
+*.exe
+
+# Cache directories
+.cache/
+
+# Qt
+*.user
+*.user.*
+*.qmake.stash
+moc_*.cpp
+qrc_*.cpp
+ui_*.h
+Makefile*
+
+# CMake
+/build/
+CMakeFiles/
+CMakeCache.txt
+CMakeScripts/
+cmake_install.cmake
+install_manifest.txt
+*.cmake
+!CMakeLists.txt
+Testing/
+*.ninja
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*~

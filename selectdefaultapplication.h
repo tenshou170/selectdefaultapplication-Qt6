@@ -1,5 +1,4 @@
-#ifndef WIDGET_H
-#define WIDGET_H
+#pragma once
 
 #include <QWidget>
 #include <QMimeDatabase>
@@ -10,24 +9,19 @@
 #include <QLineEdit>
 #include <QSet>
 #include <QMenu>
+#include "xdgmimeapps.h"
 
 class QFileInfo;
 class QTreeWidget;
 class QListWidget;
 class QPushButton;
 
-enum overwriteConfirm {
-	NON_DESTRUCTIVE,
-	OVERWRITE_ALL,
-	CANCEL_CHANGES,
-};
-
 class SelectDefaultApplication : public QWidget {
 	Q_OBJECT
 
 public:
 	SelectDefaultApplication(QWidget *parent, bool isVerbose);
-	~SelectDefaultApplication();
+	~SelectDefaultApplication() override;
 
 private slots:
 	void onApplicationSelected();
@@ -36,37 +30,23 @@ private slots:
 	void showHelp();
 	void constrictGroup(QAction *action);
 	void enableSetDefaultButton();
+	void onRemoveDefaultClicked();
 
 private:
-	void loadDesktopFile(const QFileInfo &fileInfo);
 	void setDefault(const QString &appName, QSet<QString> &mimetypes);
 	void loadIcons(const QString &path);
 	void addToMimetypeList(QListWidget *list, const QString &mimetypeName, const bool selected);
 	void readCurrentDefaultMimetypes();
 	bool applicationHasAnyCorrectMimetype(const QString &appName);
 	void onApplicationSelectedLogic(bool allowEnable);
-	const QString wrapperMimeTypeForName(const QString &name);
-	overwriteConfirm getOverwriteConfirmation(const QHash<QString, QString> &warnings);
+
+	QSet<QString> getGranularOverwriteConfirmation(const QHash<QString, QString> &warnings, const QString &newApp);
 	const QString mimetypeDescription(QString name);
 
-	// Hashtable of application names to hashtables of mimetypes to .desktop file entries
-	QHash<QString, QHash<QString, QString> > m_apps;
-	// Hashtable of application names to icons
-	QHash<QString, QString> m_applicationIcons;
-	// Multi-hashtable with keys as parent mime types and values as all children of that mimetype which are encountered
-	QMultiHash<QString, QString> m_childMimeTypes;
-
-	// Set containing all the mimegroups we saw
-	QSet<QString> m_mimegroups;
 	// Global variable to match selected mimegroup on
 	QString m_filterMimegroup;
 	// Multi-hashtable with keys as mimetypes and values as application names
 	QHash<QString, QString> m_defaultApps;
-	// Multi-hashtable with keys as .desktop files and values as mimetypes, read from mimeapps.list
-	// Note this is opposite how they are actually stored. It is done this way so that we can read mimeapps.list before
-	// parsing anything else and then as we loop over all .desktop files, fill up the associations between programs and
-	// mimetypes. Remains constant after startup
-	QMultiHash<QString, QString> m_defaultDesktopEntries;
 
 	bool isVerbose;
 
@@ -76,6 +56,9 @@ private:
 
 	QMimeDatabase m_mimeDb;
 
+	// XDG MIME Apps specification compliant config manager
+	XdgMimeApps m_xdgMimeApps;
+
 	// UI elements
 	QListWidget *m_applicationList;
 	QListWidget *m_mimetypeList;
@@ -84,9 +67,8 @@ private:
 	QPushButton *m_groupChooser;
 	QMenu *m_mimegroupMenu;
 	QPushButton *m_setDefaultButton;
+	QPushButton *m_removeDefaultButton;
 	QToolButton *m_infoButton;
 	QLabel *m_middleBanner;
 	QLabel *m_rightBanner;
 };
-
-#endif // WIDGET_H

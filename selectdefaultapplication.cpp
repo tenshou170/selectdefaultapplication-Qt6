@@ -1,5 +1,7 @@
 #include "selectdefaultapplication.h"
-#include <QDebug>
+#include <QLoggingCategory>
+#include <QCheckBox>
+#include <QDialog>
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
@@ -15,15 +17,13 @@
 SelectDefaultApplication::SelectDefaultApplication(QWidget *parent, bool isVerbose)
 	: QWidget(parent), isVerbose(isVerbose)
 {
-	readCurrentDefaultMimetypes();
-	for (const QString &dirPath : QStandardPaths::standardLocations(QStandardPaths::ApplicationsLocation)) {
-		qDebug() << "Loading applications from" << dirPath;
-		QDir applicationsDir(dirPath);
+	m_xdgMimeApps.loadApplications(isVerbose);
+	m_xdgMimeApps.loadAllConfigs(isVerbose);
 
-		for (const QFileInfo &file : applicationsDir.entryInfoList(QStringList("*.desktop"))) {
-			loadDesktopFile(file);
-		}
-	}
+	readCurrentDefaultMimetypes();
+
+	// Now that m_apps is populated, sync human-readable names with XDG defaults
+	readCurrentDefaultMimetypes();
 
 	// Preload icons up front, so it doesn't get sluggish when selecting applications
 	// supporting a lot
@@ -39,7 +39,9 @@ SelectDefaultApplication::SelectDefaultApplication(QWidget *parent, bool isVerbo
 	}
 
 	// Set m_mimeTypeIcons[mimetypeName] to an appropriate icon
-	for (const QHash<QString, QString> &application_associations : m_apps.values()) {
+	const auto &apps = m_xdgMimeApps.getApps();
+	const auto &appIcons = m_xdgMimeApps.getApplicationIcons();
+	for (const QHash<QString, QString> &application_associations : apps.values()) {
 		for (const QString &mimetypeName : application_associations.keys()) {
 			if (m_mimeTypeIcons.contains(mimetypeName)) {
 				continue;
@@ -100,16 +102,22 @@ SelectDefaultApplication::SelectDefaultApplication(QWidget *parent, bool isVerbo
 
 	m_mimegroupMenu = new QMenu(m_groupChooser);
 	m_mimegroupMenu->addAction(tr("All"));
-	QStringList sorted_mimegroups = m_mimegroups.values();
-	sorted_mimegroups.sort();
+	QStringList sorted_mimegroups = m_xdgMimeApps.getMimeGroups().values();
+	std::sort(sorted_mimegroups.begin(), sorted_mimegroups.end());
 	for (const QString &mimegroup : sorted_mimegroups) {
 		m_mimegroupMenu->addAction(mimegroup);
 	}
 	m_groupChooser->setMenu(m_mimegroupMenu);
 
+	// Help button
+	m_infoButton = new QToolButton();
+	m_infoButton->setText("?");
+	m_infoButton->setFixedSize(24, 24);
+
 	QHBoxLayout *filterHolder = new QHBoxLayout;
 	filterHolder->addWidget(m_searchBox);
 	filterHolder->addWidget(m_groupChooser);
+	filterHolder->addWidget(m_infoButton);
 
 	QVBoxLayout *leftLayout = new QVBoxLayout;
 	leftLayout->addLayout(filterHolder);
@@ -117,12 +125,15 @@ SelectDefaultApplication::SelectDefaultApplication(QWidget *parent, bool isVerbo
 
 	// Middle section
 	m_middleBanner = new QLabel(tr("Select an application to see its defaults."));
+	m_middleBanner->setWordWrap(true);
+	m_middleBanner->setMinimumHeight(40);
+	m_middleBanner->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
 
 	m_mimetypeList = new QListWidget;
-	m_mimetypeList->setSelectionMode(QAbstractItemView::MultiSelection);
+	m_mimetypeList->setUniformItemSizes(true);
+	m_mimetypeList->setSelectionMode(QAbstractItemView::ExtendedSelection);
 
-	m_setDefaultButton = new QPushButton();
-	m_setDefaultButton->setText(tr("Set as default application for these file types"));
+	m_setDefaultButton = new QPushButton(tr("Add association(s)"));
 	m_setDefaultButton->setEnabled(false);
 
 	QVBoxLayout *middleLayout = new QVBoxLayout;
@@ -132,35 +143,41 @@ SelectDefaultApplication::SelectDefaultApplication(QWidget *parent, bool isVerbo
 
 	// Right section
 	m_rightBanner = new QLabel("");
-
-	m_infoButton = new QToolButton();
-	m_infoButton->setText("?");
-
-	QHBoxLayout *infoHolder = new QHBoxLayout;
-	infoHolder->addWidget(m_rightBanner);
-	infoHolder->addWidget(m_infoButton);
+	m_rightBanner->setWordWrap(true);
+	m_rightBanner->setMinimumHeight(40);
+	m_rightBanner->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
 
 	m_currentDefaultApps = new QListWidget;
-	m_currentDefaultApps->setSelectionMode(QAbstractItemView::NoSelection);
+	m_currentDefaultApps->setSelectionMode(QAbstractItemView::SingleSelection);
+
+	m_removeDefaultButton = new QPushButton(tr("Remove association(s)"));
+	m_removeDefaultButton->setEnabled(false);
 
 	QVBoxLayout *rightLayout = new QVBoxLayout;
-	rightLayout->addLayout(infoHolder);
+	rightLayout->addWidget(m_rightBanner);
 	rightLayout->addWidget(m_currentDefaultApps);
+	rightLayout->addWidget(m_removeDefaultButton);
 
 	// Main layout and connections
 	QHBoxLayout *mainLayout = new QHBoxLayout;
 	setLayout(mainLayout);
-	mainLayout->addLayout(leftLayout);
-	mainLayout->addLayout(middleLayout);
-	mainLayout->addLayout(rightLayout);
+	mainLayout->addLayout(leftLayout, 1);
+	mainLayout->addLayout(middleLayout, 1);
+	mainLayout->addLayout(rightLayout, 1);
 
 	connect(m_applicationList, &QListWidget::itemSelectionChanged, this,
 		&SelectDefaultApplication::onApplicationSelected);
 	connect(m_mimetypeList, &QListWidget::itemActivated, this, &SelectDefaultApplication::enableSetDefaultButton);
+	connect(m_currentDefaultApps, &QListWidget::itemSelectionChanged, this,
+		&SelectDefaultApplication::enableSetDefaultButton);
 	connect(m_setDefaultButton, &QPushButton::clicked, this, &SelectDefaultApplication::onSetDefaultClicked);
+	connect(m_removeDefaultButton, &QPushButton::clicked, this, &SelectDefaultApplication::onRemoveDefaultClicked);
 	connect(m_infoButton, &QToolButton::clicked, this, &SelectDefaultApplication::showHelp);
 	connect(m_searchBox, &QLineEdit::textEdited, this, &SelectDefaultApplication::populateApplicationList);
 	connect(m_mimegroupMenu, &QMenu::triggered, this, &SelectDefaultApplication::constrictGroup);
+
+	// Set a reasonable default window size
+	resize(1000, 600);
 }
 
 SelectDefaultApplication::~SelectDefaultApplication()
@@ -194,16 +211,23 @@ void SelectDefaultApplication::onApplicationSelectedLogic(bool allowEnabled)
 	m_middleBanner->setText(appName + tr(" can open:"));
 	m_rightBanner->setText(appName + tr(" currently opens:"));
 	m_currentDefaultApps->clear();
-	for (QString &mimetype : m_defaultApps.keys(appName)) {
+
+	QStringList currentMimes = m_defaultApps.keys(appName);
+	qCDebug(sdaLog) << "SelectDefaultApplication: Application" << appName << "currently opens"
+			<< currentMimes.count() << "file types";
+
+	for (const QString &mimetype : currentMimes) {
 		addToMimetypeList(m_currentDefaultApps, mimetype, false);
 	}
 
-	const QHash<QString, QString> &officiallySupported = m_apps.value(appName);
+	const auto &apps = m_xdgMimeApps.getApps();
+	const auto &childMimeTypes = m_xdgMimeApps.getChildMimeTypes();
+	const QHash<QString, QString> &officiallySupported = apps.value(appName);
 
 	// E. g. kwrite and kate only indicate support for "text/plain", but they're nice for things like C source files.
 	QSet<QString> impliedSupported;
 	for (const QString &mimetype : officiallySupported.keys()) {
-		for (const QString &child : m_childMimeTypes.values(mimetype)) {
+		for (const QString &child : childMimeTypes.values(mimetype)) {
 			// Ensure that the officially supported keys don't contain this value
 			if (!officiallySupported.contains(child)) {
 				impliedSupported.insert(child);
@@ -223,6 +247,7 @@ void SelectDefaultApplication::onApplicationSelectedLogic(bool allowEnabled)
 	}
 
 	m_setDefaultButton->setEnabled(allowEnabled && m_mimetypeList->count() > 0);
+	m_removeDefaultButton->setEnabled(false);
 }
 void SelectDefaultApplication::addToMimetypeList(QListWidget *list, const QString &mimetypeName, const bool selected)
 {
@@ -263,115 +288,8 @@ void SelectDefaultApplication::onSetDefaultClicked()
 	setDefault(application, selected);
 }
 
-void SelectDefaultApplication::loadDesktopFile(const QFileInfo &fileInfo)
-{
-	// Ugliest implementation of .desktop file reading ever
-
-	QFile file(fileInfo.absoluteFilePath());
-	if (!file.open(QIODevice::ReadOnly)) {
-		qWarning() << "Error: Failed to open" << fileInfo.fileName();
-		return;
-	}
-
-	// The filename of the desktop file
-	const QString &appFile = fileInfo.fileName();
-	// The mimetypes the application can support
-	QStringList mimetypes;
-	// The name of the application in its desktop entry
-	// Used as the primary key with which associations are made
-	QString appName;
-	// The name of the icon as given in the desktop entry
-	QString appIcon;
-
-	while (!file.atEnd()) {
-		// Removes all runs of whitespace, but won't make `Name=` and `Name =` the same
-		QString line = file.readLine().simplified();
-
-		if (line.startsWith('[')) {
-			if (line == "[Desktop Entry]") {
-				continue;
-			}
-			// Multiple groups may not have the same name, and [Desktop Entry] must be the first group. So we are done otherwise
-			break;
-		} else {
-			// Trim the strings because the '=' can be padded with spaces because FreeDesktop is stupid, even though not a single desktop file on my computer uses that
-			const QString key = line.section('=', 0, 0).trimmed();
-			const QString value = line.section('=', 1).trimmed();
-
-			if (key == "Name") {
-				appName = value;
-			} else if (key == "MimeType") {
-				mimetypes = value.split(';', Qt::SkipEmptyParts);
-			} else if (key == "Icon") {
-				appIcon = value;
-			}
-			// Else ignore the key
-		}
-	}
-
-	if (!appIcon.isEmpty() && m_applicationIcons[appFile].isEmpty()) {
-		m_applicationIcons[appName] = appIcon;
-	}
-	// Even if mimetypes is empty, set the icon in case a different one isn't
-	if (mimetypes.isEmpty()) {
-		return;
-	}
-
-	// Note that this program is the one that can edit some files from the defaults, if it is
-	if (m_defaultDesktopEntries.contains(appFile)) {
-		for (QString &mimetype : m_defaultDesktopEntries.values(appFile)) {
-			m_defaultApps[mimetype] = appName;
-		}
-	}
-
-	for (const QString &readMimeName : mimetypes) {
-		// Resolve aliases etc
-		QString mimetypeName = wrapperMimeTypeForName(readMimeName);
-		if (mimetypeName == "") {
-			// An invalid QMimeType returns "" for .name(), so if it occurs then we should ignore it
-			if (isVerbose) {
-				qDebug() << "In file " << appName << " mimetype " << readMimeName
-					 << " is invalid. Ignoring...";
-			}
-			continue;
-		}
-
-		// Create a database of mimetypes this application is a child of
-		// So applications that can edit parent mimetypes can also have associations formed to their child mimetypes
-		// Unless the parent is 'application/octet-stream' because I guess a lot of stuff has that as its parent
-		// Example: Kate editing text/plain can edit C source code
-		const QMimeType mimetype = m_mimeDb.mimeTypeForName(readMimeName.trimmed());
-		// if !mimetype.isValid() this just won't enter the loop
-		for (const QString &parent : mimetype.parentMimeTypes()) {
-			if (parent == "application/octet-stream") {
-				break;
-			}
-			m_childMimeTypes.insert(parent, mimetypeName);
-		}
-
-		if (mimetypeName.count('/') != 1) {
-			qWarning() << "Warning: encountered mimetype " << mimetypeName
-				   << " without exactly 1 '/' character in " << appFile
-				   << " Unsure what to do, skipping...";
-			continue;
-		}
-		// Now that we've checked this, we can get the mimegroup and add it to the global list
-		const QString mimegroup = mimetypeName.section('/', 0, 0);
-		m_mimegroups.insert(mimegroup);
-
-		// Indexing in Qt creates a default element if one doesn't exist, so we don't need to explicitely check if m_apps[appName] exists
-		// If we've already got an association for this app from a different desktop file, don't overwrite it because we read highest-priority .desktops first
-		if (m_apps[appName].contains(mimetypeName)) {
-			// Annoyingly, some apps like KDE mobile apps add associations for *the same exact file type* through two different aliases, so this gets spammed a lot.
-			if (isVerbose) {
-				qDebug() << "Debug: " << appName << " already handles " << mimetypeName << " with "
-					 << m_apps[appName][mimetypeName] << " so " << appFile << "will be ignored";
-			}
-			continue;
-		}
-		m_apps[appName][mimetypeName] = appFile;
-	}
-}
+// chunk 1 removed
+// rest of function removed
 
 // Removes values from mimetypes if warnings exist and the user requests to do a non-destructive change
 void SelectDefaultApplication::setDefault(const QString &appName, QSet<QString> &mimetypes)
@@ -411,7 +329,7 @@ void SelectDefaultApplication::setDefault(const QString &appName, QSet<QString> 
 				continue;
 			}
 
-			const QString mimetype = wrapperMimeTypeForName(line.split('=').first().trimmed());
+			const QString mimetype = m_xdgMimeApps.normalizeMimeType(line.split('=').first().trimmed());
 			// If we aren't setting this mimetype, leave any entry, even others that this application owns
 			if (!mimetypes.contains(mimetype)) {
 				existingAssociations.append(line);
@@ -420,8 +338,9 @@ void SelectDefaultApplication::setDefault(const QString &appName, QSet<QString> 
 
 			// Ensure that if a mimetype is selected and is set as default for a different application, we warn about it
 			const QString handlingAppFile = line.split('=')[1].trimmed();
-			const QString appFile = m_apps[appName].value(mimetype);
-			if (appFile != handlingAppFile && m_apps[appName].contains(mimetype)) {
+			const auto &apps = m_xdgMimeApps.getApps();
+			const QString appFile = apps[appName].value(mimetype);
+			if (appFile != handlingAppFile && apps[appName].contains(mimetype)) {
 				warnings[mimetype] = handlingAppFile;
 			}
 		}
@@ -434,13 +353,15 @@ void SelectDefaultApplication::setDefault(const QString &appName, QSet<QString> 
 
 	// Display warnings and get user confirmation that we should proceed
 	if (!warnings.isEmpty()) {
-		overwriteConfirm confirm = getOverwriteConfirmation(warnings);
-		if (confirm == CANCEL_CHANGES) {
-			return;
+		QSet<QString> mimesToOverwrite = getGranularOverwriteConfirmation(warnings, appName);
+		if (mimesToOverwrite.isEmpty()) {
+			return; // User canceled
 		}
-		if (confirm == NON_DESTRUCTIVE) {
-			for (QString warningType : warnings.keys()) {
-				// Add to existing associations
+
+		// Remove mimes that user chose NOT to overwrite
+		for (const QString &warningType : warnings.keys()) {
+			if (!mimesToOverwrite.contains(warningType)) {
+				// Keep the existing association
 				const QString warning = warningType + '=' + warnings[warningType];
 				existingAssociations.append(warning.toUtf8());
 				// Remove from values to set
@@ -450,97 +371,94 @@ void SelectDefaultApplication::setDefault(const QString &appName, QSet<QString> 
 	}
 
 	// Write the file
-	if (!file.open(QIODevice::WriteOnly)) {
-		QMessageBox::warning(this, tr("Failed to store settings"), file.errorString());
-		return;
-	}
-
-	for (const QByteArray &line : existingContent) {
-		file.write(line + '\n');
-	}
-	file.write("\n[Default Applications]\n");
-	for (const QByteArray &line : existingAssociations) {
-		file.write(line + '\n');
-	}
-
-	for (const QString &mimetype : mimetypes) {
-		const QString &appFile = m_apps[appName][mimetype];
-		file.write(QString(mimetype + '=' + appFile + '\n').toUtf8());
-		if (isVerbose) {
-			qDebug() << "Writing setting: " << mimetype << "="
-				 << "appFile";
+	QHash<QString, QSet<QString> > fileToMimes;
+	const auto &apps = m_xdgMimeApps.getApps();
+	for (const QString &mime : mimetypes) {
+		QString file = apps[appName].value(mime);
+		if (!file.isEmpty()) {
+			fileToMimes[file].insert(mime);
 		}
-		// Update UI also
-		m_defaultApps[mimetype] = appName;
 	}
 
+	for (auto it = fileToMimes.begin(); it != fileToMimes.end(); ++it) {
+		m_xdgMimeApps.setDefaults(it.key(), it.value());
+	}
+
+	// Refresh everything from disk to ensure UI is in sync
+	readCurrentDefaultMimetypes();
 	// Redraw and make the button unclickable so there is always user feedback
 	onApplicationSelectedLogic(false);
 }
 
 void SelectDefaultApplication::readCurrentDefaultMimetypes()
 {
-	const QString filePath =
-		QDir(QStandardPaths::writableLocation(QStandardPaths::ConfigLocation)).absoluteFilePath("mimeapps.list");
-	QFile file(filePath);
+	qCDebug(sdaLog) << "SelectDefaultApplication: Refreshing current default mimetypes...";
+	// Load all mimeapps.list files in XDG precedence order
+	m_xdgMimeApps.loadAllConfigs();
 
-	// Read in existing mimeapps.list, skipping the lines for the mimetypes we're updating
-	if (file.open(QIODevice::ReadOnly)) {
-		bool inCorrectGroup = false;
-		while (!file.atEnd()) {
-			const QByteArray line = file.readLine().trimmed();
+	// Sync human-readable app names with their desktop file defaults
+	m_defaultApps.clear();
 
-			if (line.isEmpty()) {
-				continue;
-			}
-
-			if (line.startsWith('[')) {
-				inCorrectGroup = (line == "[Default Applications]");
-				continue;
-			}
-
-			if (!inCorrectGroup) {
-				continue;
-			}
-
-			if (!line.contains('=')) {
-				continue;
-			}
-
-			const QString mimetype = wrapperMimeTypeForName(line.split('=').first().trimmed());
-			const QString appFile = line.split('=')[1];
-			m_defaultDesktopEntries.insert(appFile, mimetype);
-		}
-
-		file.close();
-	} else {
-		qWarning() << "Unable to open file for reading" << file.errorString();
+	const auto &apps = m_xdgMimeApps.getApps();
+	if (apps.isEmpty()) {
+		qCDebug(sdaLog)
+			<< "SelectDefaultApplication: Applications not loaded yet, skipping human-readable name sync";
+		return;
 	}
+
+	int syncCount = 0;
+	// We iterate over all applications and their supported mimetypes
+	// If the application's desktop file matches the XDG default for that mimetype,
+	// record it in m_defaultApps so the UI shows it as "currently opens".
+	for (auto it = apps.begin(); it != apps.end(); ++it) {
+		const QString &appName = it.key();
+		const QHash<QString, QString> &appMimetypes = it.value();
+		for (auto mit = appMimetypes.begin(); mit != appMimetypes.end(); ++mit) {
+			const QString &mimetype = mit.key();
+			const QString &appFileId = mit.value();
+
+			if (m_xdgMimeApps.getDefaultApp(mimetype) == appFileId) {
+				m_defaultApps[mimetype] = appName;
+				syncCount++;
+			}
+		}
+	}
+	qCDebug(sdaLog) << "SelectDefaultApplication: Sync-ed" << syncCount << "associations to UI";
 }
 
 void SelectDefaultApplication::populateApplicationList(const QString &filter)
 {
-	// Clear the list in case we are updating it (i.e. performing a search)
 	m_applicationList->clear();
+	const auto &apps = m_xdgMimeApps.getApps();
+	const auto &appIcons = m_xdgMimeApps.getApplicationIcons();
+	QStringList sorted_app_names = apps.keys();
+	std::sort(sorted_app_names.begin(), sorted_app_names.end());
 
-	// Filter entries based on the filter string
-	QStringList applications = m_apps.keys().filter(filter, Qt::CaseInsensitive);
-	// Iterate over the array, removing elements who have no desktop entries which can handle the correct mimetype
-	for (QStringList::size_type i = applications.size(); i--;) {
-		if (!applicationHasAnyCorrectMimetype(applications[i])) {
-			applications.removeAt(i);
+	for (const QString &appName : sorted_app_names) {
+		if (!filter.isEmpty() && !appName.contains(filter, Qt::CaseInsensitive)) {
+			continue;
 		}
-	}
 
-	// Sort the remaining applications
-	applications.sort();
+		if (!m_filterMimegroup.isEmpty() && !applicationHasAnyCorrectMimetype(appName)) {
+			continue;
+		}
 
-	// Add each application to the left panel
-	for (const QString &appName : applications) {
-		QListWidgetItem *app = new QListWidgetItem(appName);
-		app->setIcon(QIcon::fromTheme(m_applicationIcons[appName]));
-		m_applicationList->addItem(app);
-		app->setSelected(false);
+		QListWidgetItem *item = new QListWidgetItem(appName);
+		item->setData(Qt::UserRole, appName);
+
+		QString iconName = appIcons.value(appName);
+		if (!iconName.isEmpty()) {
+			if (m_iconPaths.contains(iconName)) {
+				item->setIcon(QIcon(m_iconPaths.value(iconName)));
+			} else {
+				item->setIcon(QIcon::fromTheme(iconName));
+			}
+		} else {
+			// Fallback if no icon name (though XDG usually provides one)
+			item->setIcon(QIcon::fromTheme("application-x-executable"));
+		}
+
+		m_applicationList->addItem(item);
 	}
 }
 
@@ -577,62 +495,139 @@ void SelectDefaultApplication::constrictGroup(QAction *action)
 
 void SelectDefaultApplication::enableSetDefaultButton()
 {
-	m_setDefaultButton->setEnabled(true);
+	m_setDefaultButton->setEnabled(m_mimetypeList->selectedItems().count() > 0);
+	m_removeDefaultButton->setEnabled(m_currentDefaultApps->selectedItems().count() > 0);
+}
+
+void SelectDefaultApplication::onRemoveDefaultClicked()
+{
+	QList<QListWidgetItem *> selectedItems = m_applicationList->selectedItems();
+	if (selectedItems.count() != 1) {
+		return;
+	}
+
+	QList<QListWidgetItem *> mimetypesToRemove = m_currentDefaultApps->selectedItems();
+	if (mimetypesToRemove.isEmpty()) {
+		return;
+	}
+
+	QSet<QString> mimesToRemove;
+	for (QListWidgetItem *item : mimetypesToRemove) {
+		mimesToRemove.insert(item->data(Qt::UserRole).toString());
+	}
+	m_xdgMimeApps.removeDefaults(mimesToRemove);
+
+	// Refresh everything from disk
+	readCurrentDefaultMimetypes();
+	// Update UI panels
+	onApplicationSelectedLogic(false);
 }
 
 void SelectDefaultApplication::showHelp()
 {
 	QMessageBox *dialog = new QMessageBox(this);
-	dialog->setText(tr("Help about Select Default Application"));
+	dialog->setText(tr("<h3>Help about Select Default Application</h3>"));
 	dialog->setInformativeText(tr(
-		"To use this program, select any applications on the left panel.\n"
-		"Then select or deselect any mimetypes in the center that you want this application to open. Most of the time, you can leave this at the defaults; it will choose all the mimetypes the application has explicit support for.\n"
-		"Finally, press at the bottom of the screen to make the highlighted mimetypes open with the selected application by default.\n"
-		"You can see your changes on the right. Any application that you have configured will report it there.\n"
-		"---------------------------------------------------------------------------------------\n"
-		"Explanation of how this works: A FreeDesktop has Desktop Entries (.desktop files) in several locations; /usr/share/applications/, /usr/local/share/applications/, and ~/.local/share/applications/ by default.\n"
-		"These desktop entries tell application launchers how to run programs, including the tool 'xdg-open' which is the standard tool to open files and URLs.\n"
-		"xdg-open reads Desktop Entries in an unpredictable order in order to determine what application to handle that file; it uses the `MimeType` key present in a Desktop Entry to determine this.\n"
-		"There is also a user configuration file, `~/.config/mimeapps.list`, which it reads first and gives higher precedence.\n"
-		"This program parses all the Desktop Entries on the system, as well as the `mimeapps.list`, to determine what programs exist and which are set as defaults.\n"
-		"Then, when you click to 'set as default for these filetypes', it reads `mimeapps.list`, and sets the keys you have highlighted to the new values.\n"));
+		"<html><body>"
+		"<p><b>To use this program:</b>"
+		"<ul>"
+		"<li>Select any application on the <b>left panel</b>.</li>"
+		"<li>Select or deselect any mimetypes in the <b>center</b> that you want this application to open.</li>"
+		"<li>Using defaults is usually best; it will choose all mimetypes the application has explicit support for.</li>"
+		"<li>Press <b>Add association(s)</b> at the bottom to apply changes.</li>"
+		"</ul>"
+		"<p>You can see your changes on the <b>right panel</b>.</p>"
+		"<hr>"
+		"<p><b>How this works:</b></p>"
+		"<p>FreeDesktop environments utilize <b>Desktop Entries</b> (<code>.desktop</code> files) to tell launchers how to run programs.</p>"
+		"<p>The tool <code>xdg-open</code> uses these entries to determine which application handles a file type, reading from system locations like <code>/usr/share/applications/</code> and user config at <code>~/.config/mimeapps.list</code>.</p>"
+		"<p>This program parses these files to visualize current associations. When you apply changes, it writes to your <code>mimeapps.list</code>, ensuring your preferences take precedence.</p>"
+		"</body></html>"));
 	dialog->exec();
 }
 
-overwriteConfirm SelectDefaultApplication::getOverwriteConfirmation(const QHash<QString, QString> &warnings)
+QSet<QString> SelectDefaultApplication::getGranularOverwriteConfirmation(const QHash<QString, QString> &warnings,
+									 const QString &newApp)
 {
-	QMessageBox *dialog = new QMessageBox(this);
-	dialog->setText(tr("Changing will overwrite existing configuration:"));
+	QDialog *dialog = new QDialog(this);
+	dialog->setWindowTitle(tr("Conflicting Associations Detected"));
+	dialog->setMinimumWidth(500);
 
-	QString conflicts = "";
-	for (QString warningType : warnings.keys()) {
-		conflicts += warningType + tr(" is opened by ") + warnings[warningType] + '\n';
+	QVBoxLayout *mainLayout = new QVBoxLayout(dialog);
+
+	// Description label
+	QLabel *descLabel = new QLabel(tr("The following MIME types are already assigned to other applications.\n"
+					  "Select which ones you want to overwrite:"));
+	descLabel->setWordWrap(true);
+	mainLayout->addWidget(descLabel);
+
+	// Create checkboxes for each conflict
+	QHash<QString, QCheckBox *> checkboxes;
+	for (auto it = warnings.begin(); it != warnings.end(); ++it) {
+		const QString &mimetype = it.key();
+		const QString &currentApp = it.value();
+
+		QCheckBox *checkbox = new QCheckBox();
+		checkbox->setChecked(true); // Default to overwrite
+
+		// Format: "application/x-msi (currently: Bottles)"
+		QString labelText = QString("%1\n  Currently: %2").arg(mimetype, currentApp);
+		checkbox->setText(labelText);
+
+		checkboxes[mimetype] = checkbox;
+		mainLayout->addWidget(checkbox);
 	}
-	dialog->setInformativeText(conflicts);
 
-	// We're sort of abusing the roles here
-	dialog->addButton("Overwrite settings", QMessageBox::ApplyRole);
-	dialog->addButton("Add non-conflicting rules", QMessageBox::AcceptRole);
-	dialog->addButton("Cancel all changes", QMessageBox::RejectRole);
-	// Because of forementioned abuse, make sure the code works at compile time
-	static_assert(QMessageBox::ApplyRole != QMessageBox::AcceptRole, "Collision in QMessageBox return types!");
+	// Buttons
+	QHBoxLayout *buttonLayout = new QHBoxLayout();
+	buttonLayout->addStretch();
 
-	int prompt = dialog->exec();
-	// if (QMessageBox::ApplyRole == prompt) { // For some god-forsaken reason exec returns 1 and not its actual role, unsure how to ensure this is correct at compile-time
-	if (0 == prompt) {
-		return OVERWRITE_ALL;
-	// if (QMessageBox::AcceptRole == prompt) { // For some god-forsaken reason exec returns 1 and not its actual role
-	} else if (1 == prompt) {
-		return NON_DESTRUCTIVE;
+	QPushButton *applyButton = new QPushButton(tr("Apply Selected"));
+	QPushButton *cancelButton = new QPushButton(tr("Cancel"));
+
+	buttonLayout->addWidget(applyButton);
+	buttonLayout->addWidget(cancelButton);
+	mainLayout->addLayout(buttonLayout);
+
+	connect(applyButton, &QPushButton::clicked, dialog, &QDialog::accept);
+	connect(cancelButton, &QPushButton::clicked, dialog, &QDialog::reject);
+
+	QSet<QString> result;
+	if (dialog->exec() == QDialog::Accepted) {
+		// Collect checked MIME types
+		for (auto it = checkboxes.begin(); it != checkboxes.end(); ++it) {
+			if (it.value()->isChecked()) {
+				result.insert(it.key());
+			}
+		}
 	}
-	return CANCEL_CHANGES;
+
+	delete dialog;
+	return result;
 }
 
 bool SelectDefaultApplication::applicationHasAnyCorrectMimetype(const QString &appName)
 {
-	for (QString appFile : m_apps[appName].keys()) {
-		if (appFile.startsWith(m_filterMimegroup)) {
+	const QString &filter = m_filterMimegroup;
+	const auto &apps = m_xdgMimeApps.getApps();
+	const auto &childMimeTypes = m_xdgMimeApps.getChildMimeTypes();
+
+	if (!apps.contains(appName)) {
+		return false;
+	}
+
+	const QHash<QString, QString> &appMimetypes = apps.value(appName);
+	for (auto it = appMimetypes.keyBegin(); it != appMimetypes.keyEnd(); ++it) {
+		if (it->startsWith(filter)) {
 			return true;
+		}
+		// Also check if any of the child mimetypes match
+		// E.g. if we have text/plain, we also match text/x-csrc
+		const QStringList children = childMimeTypes.values(*it);
+		for (const QString &child : children) {
+			if (child.startsWith(filter)) {
+				return true;
+			}
 		}
 	}
 	return false;
@@ -642,22 +637,9 @@ const char *X_SCHEME_HANDLER = "x-scheme-handler/";
 // Returns the value of m_mimeDb.mimeTypeForName(name) but
 // mimeTypeForName(application/x-pkcs12) always returns application/x-pkcs12 instead of application/pkcs12
 // If starts with x-scheme-handler, instead just returns the argument
-const QString SelectDefaultApplication::wrapperMimeTypeForName(const QString &name) {
-	if (name.startsWith(X_SCHEME_HANDLER)) {
-		// x-scheme-handler is not a valid mimetype for a file, but we do want to be able to set applications as the default handlers for it.
-		// Assumes all x-scheme-handler/* is valid
-		return name;
-	}
-	const QMimeType mimetype = m_mimeDb.mimeTypeForName(name);
-	QString mimetypeName = mimetype.name();
-	// There appears to be a bug in Qt https://bugreports.qt.io/browse/QTBUG-99509, hack around it
-	if (mimetypeName == "application/pkcs12") {
-		mimetypeName = "application/x-pkcs12";
-	}
-	return mimetypeName;
-}
 
-const QString SelectDefaultApplication::mimetypeDescription(QString name) {
+const QString SelectDefaultApplication::mimetypeDescription(QString name)
+{
 	if (name.startsWith(X_SCHEME_HANDLER)) {
 		// x-scheme-handler is not a valid mimetype for a file, but we do want to be able to set applications as the default handlers for it.
 		// Assumes all x-scheme-handler/* is valid

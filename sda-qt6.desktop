@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=SDA-Qt6
+GenericName=Select Default Application (Qt6)
+Comment=Allows you to easily select default application to open files.
+Categories=Utility;
+TryExec=sda-qt6
+Exec=sda-qt6
+Icon=sda-qt6
